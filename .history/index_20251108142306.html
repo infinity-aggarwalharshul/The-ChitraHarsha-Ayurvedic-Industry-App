@@ -1,0 +1,2379 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ChitraHarsha AyurTech - AI-Powered Ayurveda</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Load Inter font -->
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <!-- Load Lucide icons -->
+    <script
+      type="module"
+      src="https://unpkg.com/lucide-icons@latest/dist/lucide.min.js"
+    ></script>
+    <script
+      nomodule
+      src="https://unpkg.com/lucide-icons@latest/dist/lucide.js"
+    ></script>
+
+    <!-- Firebase SDKs -->
+    <script type="module">
+      import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+      import {
+        getAuth,
+        signInAnonymously,
+        signInWithCustomToken,
+        onAuthStateChanged,
+      } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+      import {
+        getFirestore,
+        doc,
+        setDoc,
+        addDoc,
+        collection,
+        onSnapshot,
+        query,
+        setLogLevel,
+      } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+      // --- App State ---
+      let db;
+      let auth;
+      let userId;
+      let chatHistoryUnsubscribe = null;
+      let newsHistoryUnsubscribe = null;
+      const appId =
+        typeof __app_id !== "undefined" ? __app_id : "default-app-id";
+      const BASE_PRICE_INR = 1200;
+
+      // --- DOM Elements ---
+      const chatInput = document.getElementById("chat-input");
+      const chatSendButton = document.getElementById("chat-send-button");
+      const chatMessages = document.getElementById("chat-messages");
+      const chatLoading = document.getElementById("chat-loading");
+
+      const herbImageInput = document.getElementById("herb-image-input");
+      const herbImageButton = document.getElementById("herb-image-button");
+      const herbImagePreview = document.getElementById("herb-image-preview");
+      const herbResult = document.getElementById("herb-result");
+      const herbLoading = document.getElementById("herb-loading");
+
+      const newsLoading = document.getElementById("news-loading");
+      const newsGrid = document.getElementById("news-grid");
+
+      // Modals
+      const loginModal = document.getElementById("login-modal");
+      const adminLoginModal = document.getElementById("admin-login-modal");
+      const telemedicineModal = document.getElementById("telemedicine-modal");
+
+      // Modal Controls
+      const loginButton = document.getElementById("login-button");
+      const loginButtonMobile = document.getElementById("login-button-mobile");
+      const closeLoginModal = document.getElementById("close-login-modal");
+      const guestButton = document.getElementById("guest-button");
+      const adminLoginLink = document.getElementById("admin-login-link");
+      const closeAdminLoginModal = document.getElementById(
+        "close-admin-login-modal"
+      );
+      const closeTelemedicineModal = document.getElementById(
+        "close-telemedicine-modal"
+      );
+
+      // Login/Register Views
+      const loginView = document.getElementById("login-view");
+      const registerView = document.getElementById("register-view");
+      const showRegisterLink = document.getElementById("show-register-link");
+      const showLoginLink = document.getElementById("show-login-link");
+
+      // Forms
+      const loginForm = document.getElementById("login-form");
+      const registerForm = document.getElementById("register-form");
+
+      // Auth Status
+      const loginStatus = document.getElementById("login-status");
+      const authSection = document.getElementById("auth-section");
+
+      // Currency Converter
+      const currencySelect = document.getElementById("currency-select");
+      const convertCurrencyButton = document.getElementById(
+        "convert-currency-button"
+      );
+      const convertedPrice = document.getElementById("converted-price");
+
+      // --- Utility Functions ---
+
+      /**
+       * Converts base64 string to a Blob.
+       * @param {string} b64Data - Base64 encoded string.
+       * @param {string} contentType - The mime type of the content.
+       * @param {number} sliceSize - Size of chunks.
+       * @returns {Blob} - The new Blob object.
+       */
+      function b64toBlob(b64Data, contentType = "", sliceSize = 512) {
+        const byteCharacters = atob(b64Data);
+        const byteArrays = [];
+        for (
+          let offset = 0;
+          offset < byteCharacters.length;
+          offset += sliceSize
+        ) {
+          const slice = byteCharacters.slice(offset, offset + sliceSize);
+          const byteNumbers = new Array(slice.length);
+          for (let i = 0; i < slice.length; i++) {
+            byteNumbers[i] = slice.charCodeAt(i);
+          }
+          const byteArray = new Uint8Array(byteNumbers);
+          byteArrays.push(byteArray);
+        }
+        return new Blob(byteArrays, { type: contentType });
+      }
+
+      /**
+       * Resizes an image file to a max width/height.
+       * @param {File} file - The image file.
+       * @param {number} maxSize - Maximum width or height.
+       * @returns {Promise<string>} - A promise that resolves with a base64 data URL.
+       */
+      function resizeImage(file, maxSize = 600) {
+        return new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = (e) => {
+            const img = new Image();
+            img.onload = () => {
+              let width = img.width;
+              let height = img.height;
+
+              if (width > height) {
+                if (width > maxSize) {
+                  height *= maxSize / width;
+                  width = maxSize;
+                }
+              } else {
+                if (height > maxSize) {
+                  width *= maxSize / height;
+                  height = maxSize;
+                }
+              }
+
+              const canvas = document.createElement("canvas");
+              canvas.width = width;
+              canvas.height = height;
+              const ctx = canvas.getContext("2d");
+              ctx.drawImage(img, 0, 0, width, height);
+              resolve(canvas.toDataURL("image/jpeg", 0.7)); // Get base64 data URL
+            };
+            img.onerror = reject;
+            img.src = e.target.result;
+          };
+          reader.onerror = reject;
+          reader.readAsDataURL(file);
+        });
+      }
+
+      /**
+       * Safely escapes HTML to prevent XSS.
+       * @param {string} str - The string to escape.
+       * @returns {string} - The escaped string.
+       */
+      function escapeHTML(str) {
+        if (!str) return "";
+        return str.replace(/[&<>"']/g, function (m) {
+          return {
+            "&": "&amp;",
+            "<": "&lt;",
+            ">": "&gt;",
+            '"': "&quot;",
+            "'": "&#039;",
+          }[m];
+        });
+      }
+
+      /**
+       * Shows a custom, non-blocking notification.
+       * @param {string} message - The message to display.
+       * @param {string} type - 'success' or 'error'.
+       */
+      function showNotification(message, type = "success") {
+        const id = "notification-msg";
+        let notification = document.getElementById(id);
+
+        if (!notification) {
+          notification = document.createElement("div");
+          notification.id = id;
+          notification.className =
+            "hidden fixed bottom-10 right-10 p-4 rounded-lg shadow-2xl z-[100] flex items-center gap-3";
+          document.body.appendChild(notification);
+        }
+
+        notification.innerHTML = ""; // Clear previous content
+
+        if (type === "success") {
+          notification.className =
+            "fixed bottom-10 right-10 bg-green-600 text-white p-4 rounded-lg shadow-2xl z-[100] flex items-center gap-3";
+          notification.innerHTML = `<i data-lucide="check-circle-2" class="w-6 h-6"></i><span class="font-medium">${escapeHTML(
+            message
+          )}</span>`;
+        } else {
+          // 'error'
+          notification.className =
+            "fixed bottom-10 right-10 bg-red-600 text-white p-4 rounded-lg shadow-2xl z-[100] flex items-center gap-3";
+          notification.innerHTML = `<i data-lucide="alert-triangle" class="w-6 h-6"></i><span class="font-medium">${escapeHTML(
+            message
+          )}</span>`;
+        }
+
+        lucide.createIcons();
+        notification.classList.remove("hidden");
+
+        // Hide after 5 seconds
+        setTimeout(() => {
+          notification.classList.add("hidden");
+        }, 5000);
+      }
+
+      /**
+       * Adds a message to the chat UI.
+       * @param {string} role - 'user' or 'model'.
+       * @param {string} text - The message content.
+       */
+      function addChatMessage(role, text) {
+        const messageElement = document.createElement("div");
+        const roleClass =
+          role === "user"
+            ? "bg-indigo-100 text-indigo-900 self-end"
+            : "bg-green-100 text-green-900 self-start";
+        const icon =
+          role === "user"
+            ? '<i data-lucide="user-circle" class="w-5 h-5 flex-shrink-0"></i>'
+            : '<i data-lucide="sparkles" class="w-5 h-5 flex-shrink-0 text-green-600"></i>';
+
+        messageElement.className = `flex items-start gap-3 rounded-lg p-3 max-w-xs md:max-w-md w-auto ${roleClass} shadow-sm`;
+        messageElement.innerHTML = `
+                ${icon}
+                <div class="whitespace-pre-wrap">${escapeHTML(text)}</div>
+            `;
+        chatMessages.appendChild(messageElement);
+        lucide.createIcons(); // Redraw icon
+        chatMessages.scrollTop = chatMessages.scrollHeight; // Scroll to bottom
+      }
+
+      // --- Gemini API Call Function ---
+
+      /**
+       * Calls the Gemini API with exponential backoff.
+       * @param {string} model - The model name (e.g., 'gemini-2.5-flash-preview-09-2025').
+       * @param {object} payload - The payload to send to the API.
+       * @param {number} maxRetries - Maximum number of retries.
+       * @returns {Promise<object>} - The API response.
+       */
+      async function callGeminiAPI(model, payload, maxRetries = 5) {
+        const apiKey = ""; // Leave empty, will be handled by the environment
+        const apiUrl = `https://generativelace.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+
+        let attempt = 0;
+        while (attempt < maxRetries) {
+          try {
+            const response = await fetch(apiUrl, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload),
+            });
+
+            if (response.status === 429 || response.status >= 500) {
+              // Throttling or server error, wait and retry
+              const delay = Math.pow(2, attempt) * 1000 + Math.random() * 1000;
+              await new Promise((resolve) => setTimeout(resolve, delay));
+              attempt++;
+            } else if (!response.ok) {
+              // Other non-retriable error
+              const errorData = await response.json();
+              throw new Error(
+                `API Error: ${response.statusText} - ${
+                  errorData.error?.message || "Unknown error"
+                }`
+              );
+            } else {
+              // Success
+              return await response.json();
+            }
+          } catch (error) {
+            if (attempt + 1 >= maxRetries) {
+              throw error; // Max retries reached
+            }
+            const delay = Math.pow(2, attempt) * 1000 + Math.random() * 1000;
+            await new Promise((resolve) => setTimeout(resolve, delay));
+            attempt++;
+          }
+        }
+        throw new Error("Max retries reached for Gemini API call.");
+      }
+
+      // --- Feature: Live Currency Conversion ---
+
+      /**
+       * Handles the live currency conversion using Gemini + Google Search.
+       */
+      async function handleCurrencyConversion() {
+        const targetCurrency = currencySelect.value;
+        if (!targetCurrency) return;
+
+        convertedPrice.textContent = "Converting...";
+        convertCurrencyButton.disabled = true;
+
+        try {
+          const systemPrompt =
+            "You are a currency conversion bot. Your only job is to provide the numerical result of a currency conversion. Use Google Search to find the *latest* exchange rate.";
+          const userQuery = `Using Google Search for the latest exchange rate, convert ${BASE_PRICE_INR} INR to ${targetCurrency}. Provide *only* the converted amount as a number, rounded to two decimal places. Do not add any currency symbols, text, or explanations. Example: '14.50'`;
+
+          const payload = {
+            contents: [{ parts: [{ text: userQuery }] }],
+            tools: [{ google_search: {} }], // Enable Google Search grounding
+            systemInstruction: {
+              parts: [{ text: systemPrompt }],
+            },
+          };
+
+          const result = await callGeminiAPI(
+            "gemini-2.5-flash-preview-09-2025",
+            payload
+          );
+          const modelText = result.candidates?.[0]?.content?.parts?.[0]?.text;
+
+          const convertedAmount = parseFloat(modelText.trim());
+
+          if (modelText && !isNaN(convertedAmount)) {
+            // Get symbol for display
+            let symbol = "";
+            switch (targetCurrency) {
+              case "USD":
+                symbol = "$";
+                break;
+              case "EUR":
+                symbol = "€";
+                break;
+              case "GBP":
+                symbol = "£";
+                break;
+              case "AUD":
+                symbol = "A$";
+                break;
+              case "CAD":
+                symbol = "C$";
+                break;
+            }
+            convertedPrice.textContent = `Approx. ${symbol}${convertedAmount.toFixed(
+              2
+            )} ${targetCurrency}`;
+          } else {
+            convertedPrice.textContent = "Could not get rate.";
+          }
+        } catch (error) {
+          console.error("Error converting currency:", error);
+          convertedPrice.textContent = "Conversion failed.";
+        } finally {
+          convertCurrencyButton.disabled = false;
+        }
+      }
+
+      // --- Feature: AI Vaidya (Chat) ---
+
+      /**
+       * Handles sending a chat message.
+       */
+      async function handleChatSend() {
+        const userText = chatInput.value.trim();
+        if (!userText || !userId) return;
+
+        addChatMessage("user", userText);
+        chatInput.value = "";
+        chatLoading.classList.remove("hidden");
+        chatSendButton.disabled = true;
+
+        try {
+          // 1. Save user message to Firestore
+          const chatCollection = collection(
+            db,
+            `artifacts/${appId}/users/${userId}/chats`
+          );
+          await addDoc(chatCollection, {
+            role: "user",
+            text: userText,
+            timestamp: new Date(),
+          });
+
+          // 2. Prepare payload for Gemini
+          const systemPrompt = `
+                    You are "AyurVaidya," an advanced AI assistant from ChitraHarsha AyurTech.
+                    Your persona is that of a wise, empathetic, and knowledgeable Ayurvedic expert (Vaidya).
+                    Your purpose is to provide information and guidance on Ayurvedic principles, remedies, lifestyle, and wellness.
+                   
+                    **Strict Guidelines:**
+                    1.  **Medical Disclaimer:** ALWAYS begin your very first response in any conversation with this disclaimer: "Namaste! I am AyurVaidya. Please note that I am an AI assistant and not a registered medical professional. My advice is for informational purposes only and not a substitute for professional medical consultation. Please consult a qualified healthcare provider for any health concerns."
+                    2.  **No Diagnosis:** You MUST NOT diagnose any medical condition, prescribe specific dosages, or give definitive medical treatment plans.
+                    3.  **Safe Guidance:** You can suggest general Ayurvedic remedies, lifestyle changes, and herbs for common, non-serious ailments (e.g., cold, stress, indigestion).
+                    4.  **Refer to Professionals:** For any serious symptoms, chronic conditions, or specific medical questions, you MUST advise the user to consult a qualified Ayurvedic practitioner or a medical doctor.
+                    5.  **Stay on Topic:** Gently guide the conversation back to Ayurveda, wellness, and ancient Indian wisdom if the user strays too far.
+                    6.  **Tone:** Be calm, respectful, encouraging, and use simple, clear language. You can use terms like "dosha," "prakriti," etc., but briefly explain them.
+                    7.  **Compliance:** All your advice must be in the spirit of guidelines from the Indian Ministry of AYUSH.
+                `;
+
+          const payload = {
+            contents: [{ role: "user", parts: [{ text: userText }] }],
+            systemInstruction: {
+              parts: [{ text: systemPrompt }],
+            },
+          };
+
+          // 3. Call Gemini API
+          const result = await callGeminiAPI(
+            "gemini-2.5-flash-preview-09-2025",
+            payload
+          );
+          const modelText = result.candidates?.[0]?.content?.parts?.[0]?.text;
+
+          if (modelText) {
+            // 4. Add model response to UI
+            addChatMessage("model", modelText);
+
+            // 5. Save model response to Firestore
+            await addDoc(chatCollection, {
+              role: "model",
+              text: modelText,
+              timestamp: new Date(),
+            });
+          } else {
+            addChatMessage(
+              "model",
+              "I am having trouble connecting right now. Please try again in a moment."
+            );
+          }
+        } catch (error) {
+          console.error("Error in handleChatSend:", error);
+          addChatMessage(
+            "model",
+            "An error occurred. Please check your connection and try again."
+          );
+        } finally {
+          chatLoading.classList.add("hidden");
+          chatSendButton.disabled = false;
+          chatInput.focus();
+        }
+      }
+
+      /**
+       * Loads chat history from Firestore.
+       */
+      function loadChatHistory() {
+        if (chatHistoryUnsubscribe) chatHistoryUnsubscribe(); // Unsubscribe from previous listener
+
+        if (!userId) {
+          chatMessages.innerHTML = ""; // Clear chat if no user
+          return;
+        }
+
+        const chatCollection = collection(
+          db,
+          `artifacts/${appId}/users/${userId}/chats`
+        );
+        const q = query(chatCollection); // Removed orderBy('timestamp') to avoid index requirement
+
+        chatHistoryUnsubscribe = onSnapshot(
+          q,
+          (snapshot) => {
+            chatMessages.innerHTML = ""; // Clear existing messages
+            let messages = [];
+            snapshot.forEach((doc) => {
+              messages.push({ id: doc.id, ...doc.data() });
+            });
+
+            // Sort messages in-memory by timestamp
+            messages.sort(
+              (a, b) => a.timestamp.toMillis() - b.timestamp.toMillis()
+            );
+
+            if (messages.length === 0) {
+              // Add a welcome message if history is empty
+              addChatMessage(
+                "model",
+                "Namaste! I am AyurVaidya, your AI wellness assistant. How can I help you on your path to balance and health today?"
+              );
+            } else {
+              messages.forEach((msg) => {
+                addChatMessage(msg.role, msg.text);
+              });
+            }
+          },
+          (error) => {
+            console.error("Error loading chat history: ", error);
+            addChatMessage("model", "Could not load chat history.");
+          }
+        );
+      }
+
+      // --- Feature: Ayurvedic Herb Scanner (Vision) ---
+
+      /**
+       * Handles the herb image scanner logic.
+       */
+      async function handleHerbScan() {
+        const file = herbImageInput.files[0];
+        if (!file) {
+          herbResult.innerHTML = `<p class="text-red-600">Please select an image first.</p>`;
+          return;
+        }
+
+        herbLoading.classList.remove("hidden");
+        herbResult.innerHTML = "";
+        herbImageButton.disabled = true;
+
+        try {
+          // 1. Resize and get base64 data
+          const base64DataUrl = await resizeImage(file, 512);
+          const base64ImageData = base64DataUrl.split(",")[1];
+
+          // Show preview
+          herbImagePreview.src = base64DataUrl;
+          herbImagePreview.classList.remove("hidden");
+
+          // 2. Prepare payload for Gemini Vision
+          const systemPrompt = `
+                    You are an "Ayurvedic Herbalist AI" from ChitraHarsha AyurTech.
+                    Your ONLY task is to identify the plant/herb in the user's image from an Ayurvedic perspective.
+                   
+                    **Response Format (JSON):**
+                    You MUST respond in a valid JSON format. Do not add any text before or after the JSON block.
+                    The JSON schema is:
+                    {
+                      "identification": {
+                        "commonName": "Common Name",
+                        "sanskritName": "Sanskrit Name",
+                        "scientificName": "Scientific Name",
+                        "identified": true | false,
+                        "confidence": "High" | "Medium" | "Low" | "None"
+                      },
+                      "ayurvedicProperties": {
+                        "rasa": "Taste (e.g., Tikta - Bitter, Katu - Pungent)",
+                        "guna": "Qualities (e.g., Laghu - Light, Rooksha - Dry)",
+                        "virya": "Potency (e.g., Sheeta - Cooling, Ushna - Heating)",
+                        "vipaka": "Post-digestive effect (e.g., Madhura - Sweet)"
+                      },
+                      "traditionalUses": "A brief, one-paragraph summary of its primary traditional uses in Ayurveda for general wellness.",
+                      "disclaimer": "This information is for educational purposes only. Consult a qualified Ayurvedic practitioner before using this herb for any health condition."
+                    }
+                   
+                    **Guidelines:**
+                    1.  If you cannot identify the plant, set "identified" to false, "confidence" to "None", and fill other fields with "N/A".
+                    2.  Keep "traditionalUses" brief and general. DO NOT prescribe or suggest treatments.
+                    3.  ALWAYS include the disclaimer.
+                `;
+
+          const payload = {
+            contents: [
+              {
+                role: "user",
+                parts: [
+                  {
+                    text: "Identify this plant from an Ayurvedic perspective based on the provided JSON schema.",
+                  },
+                  {
+                    inlineData: {
+                      mimeType: "image/jpeg",
+                      data: base64ImageData,
+                    },
+                  },
+                ],
+              },
+            ],
+            systemInstruction: {
+              parts: [{ text: systemPrompt }],
+            },
+            generationConfig: {
+              responseMimeType: "application/json",
+            },
+          };
+
+          // 3. Call Gemini API
+          const result = await callGeminiAPI(
+            "gemini-2.5-flash-preview-09-2025",
+            payload
+          );
+          const rawJsonText = result.candidates?.[0]?.content?.parts?.[0]?.text;
+
+          if (rawJsonText) {
+            // 4. Parse and display the JSON response
+            const data = JSON.parse(rawJsonText);
+            displayHerbResult(data);
+          } else {
+            herbResult.innerHTML = `<p class="text-red-600">Could not analyze the image. The model did not return a valid response.</p>`;
+          }
+        } catch (error) {
+          console.error("Error in handleHerbScan:", error);
+          herbResult.innerHTML = `<p class="text-red-600">An error occurred: ${error.message}</p>`;
+        } finally {
+          herbLoading.classList.add("hidden");
+          herbImageButton.disabled = false;
+          herbImageInput.value = null; // Reset file input
+        }
+      }
+
+      /**
+       * Displays the formatted herb identification result.
+       * @param {object} data - The parsed JSON data from the API.
+       */
+      function displayHerbResult(data) {
+        if (!data.identification || !data.identification.identified) {
+          herbResult.innerHTML = `<p class="text-lg text-yellow-700">Could not confidently identify the plant in the image. Please try a clearer picture.</p>`;
+          return;
+        }
+
+        const {
+          identification: id,
+          ayurvedicProperties: props,
+          traditionalUses,
+          disclaimer,
+        } = data;
+
+        herbResult.innerHTML = `
+                <div class="space-y-4">
+                    <h3 class="text-2xl font-bold text-green-800">${escapeHTML(
+                      id.commonName
+                    )}</h3>
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-2 text-sm">
+                        <div class="bg-green-50 p-2 rounded-md">
+                            <span class="font-semibold text-green-700 block">Sanskrit Name</span> ${escapeHTML(
+                              id.sanskritName
+                            )}
+                        </div>
+                        <div class="bg-green-50 p-2 rounded-md">
+                            <span class="font-semibold text-green-700 block">Scientific Name</span> <em class="italic">${escapeHTML(
+                              id.scientificName
+                            )}</em>
+                        </div>
+                        <div class="bg-green-50 p-2 rounded-md">
+                            <span class="font-semibold text-green-700 block">Confidence</span> ${escapeHTML(
+                              id.confidence
+                            )}
+                        </div>
+                    </div>
+                   
+                    <h4 class="text-lg font-semibold text-green-700 mt-4">Ayurvedic Properties</h4>
+                    <div class="grid grid-cols-2 md:grid-cols-4 gap-2 text-sm">
+                        <div class="bg-gray-100 p-2 rounded-md"><span class="font-semibold block">Rasa (Taste)</span> ${escapeHTML(
+                          props.rasa
+                        )}</div>
+                        <div class="bg-gray-100 p-2 rounded-md"><span class="font-semibold block">Guna (Qualities)</span> ${escapeHTML(
+                          props.guna
+                        )}</div>
+                        <div class="bg-gray-100 p-2 rounded-md"><span class="font-semibold block">Virya (Potency)</span> ${escapeHTML(
+                          props.virya
+                        )}</div>
+                        <div class="bg-gray-100 p-2 rounded-md"><span class="font-semibold block">Vipaka (Effect)</span> ${escapeHTML(
+                          props.vipaka
+                        )}</div>
+                    </div>
+
+                    <h4 class="text-lg font-semibold text-green-700 mt-4">Traditional Uses</h4>
+                    <p class="text-gray-700">${escapeHTML(traditionalUses)}</p>
+
+                    <div class="mt-4 p-3 bg-yellow-100 border-l-4 border-yellow-500 text-yellow-800 rounded-r-lg">
+                        <p class="font-semibold">Disclaimer</p>
+                        <p>${escapeHTML(disclaimer)}</p>
+                    </div>
+                </div>
+            `;
+      }
+
+      // --- Feature: Latest Ayurvedic News (Google Search) ---
+
+      /**
+       * Fetches and displays latest Ayurvedic news using Google Search grounding.
+       */
+      async function fetchAyurvedicNews() {
+        newsLoading.classList.remove("hidden");
+        newsGrid.innerHTML = "";
+
+        // This data will be saved to a 'public' path, accessible to all users.
+        // We use a specific doc ID to overwrite it each time, acting as a cache.
+        const newsCacheDoc = doc(
+          db,
+          `artifacts/${appId}/public/data/cachedNews/latest`
+        );
+
+        try {
+          const systemPrompt =
+            "You are a health news curator for ChitraHarsha AyurTech.";
+          const userQuery =
+            "Find the 3 most recent and relevant news articles or studies about Ayurveda, traditional Indian medicine, or herbal research. For each, provide the title, a 2-sentence summary, and the source URI.";
+
+          const payload = {
+            contents: [{ parts: [{ text: userQuery }] }],
+            tools: [{ google_search: {} }], // Enable Google Search grounding
+            systemInstruction: {
+              parts: [{ text: systemPrompt }],
+            },
+          };
+
+          const result = await callGeminiAPI(
+            "gemini-2.5-flash-preview-09-2025",
+            payload
+          );
+          const candidate = result.candidates?.[0];
+          const modelText = candidate?.content?.parts?.[0]?.text;
+
+          let sources = [];
+          if (candidate?.groundingMetadata?.groundingAttributions) {
+            sources = candidate.groundingMetadata.groundingAttributions
+              .map((attr) => ({
+                uri: attr.web?.uri,
+                title: attr.web?.title,
+              }))
+              .filter((source) => source.uri && source.title);
+          }
+
+          if (sources.length > 0) {
+            // Save to Firestore cache
+            await setDoc(newsCacheDoc, {
+              articles: sources,
+              text: modelText, // Also save the generated text summary
+              timestamp: new Date(),
+            });
+            // displayNews(sources); // Display will be handled by the snapshot listener
+          } else {
+            newsGrid.innerHTML = `<p class="text-gray-600 col-span-3">Could not fetch latest news at this moment.</p>`;
+          }
+        } catch (error) {
+          console.error("Error fetching Ayurvedic news:", error);
+          newsGrid.innerHTML = `<p class="text-red-600 col-span-3">An error occurred while fetching news.</p>`;
+        } finally {
+          newsLoading.classList.add("hidden");
+        }
+      }
+
+      /**
+       * Subscribes to and displays news from the Firestore cache.
+       */
+      function subscribeToNewsCache() {
+        const newsCacheDoc = doc(
+          db,
+          `artifacts/${appId}/public/data/cachedNews/latest`
+        );
+
+        if (newsHistoryUnsubscribe) newsHistoryUnsubscribe();
+
+        newsHistoryUnsubscribe = onSnapshot(
+          newsCacheDoc,
+          (doc) => {
+            if (doc.exists()) {
+              const data = doc.data();
+              const articles = data.articles || [];
+
+              // Check if cache is older than 6 hours
+              const cacheAge =
+                (new Date() - data.timestamp.toDate()) / (1000 * 60 * 60);
+              if (cacheAge > 6) {
+                fetchAyurvedicNews(); // Refresh cache
+              } else {
+                displayNews(articles); // Use cached data
+              }
+            } else {
+              // No cache, fetch news
+              fetchAyurvedicNews();
+            }
+          },
+          (error) => {
+            console.error("Error subscribing to news cache: ", error);
+            fetchAyurvedicNews(); // Try fetching anyway
+          }
+        );
+      }
+
+      /**
+       * Renders news articles in the UI.
+       * @param {Array<object>} articles - Array of article objects with {uri, title}.
+       */
+      function displayNews(articles) {
+        newsLoading.classList.add("hidden");
+        newsGrid.innerHTML = "";
+        if (!articles || articles.length === 0) {
+          newsGrid.innerHTML = `<p class="text-gray-600 col-span-3">No news articles found.</p>`;
+          return;
+        }
+
+        articles.slice(0, 3).forEach((article) => {
+          const articleEl = document.createElement("a");
+          articleEl.href = article.uri;
+          articleEl.target = "_blank";
+          articleEl.rel = "noopener noreferrer";
+          articleEl.className =
+            "block bg-white p-4 rounded-lg shadow-md hover:shadow-xl transition-shadow duration-300 border border-green-100";
+          articleEl.innerHTML = `
+                    <h4 class="text-lg font-semibold text-green-800 mb-2 truncate">${escapeHTML(
+                      article.title
+                    )}</h4>
+                    <p class="text-sm text-gray-600 truncate">${escapeHTML(
+                      article.uri
+                    )}</p>
+                    <span class="text-sm text-green-600 font-medium mt-3 inline-block">Read More &rarr;</span>
+                `;
+          newsGrid.appendChild(articleEl);
+        });
+      }
+
+      // --- Authentication ---
+
+      /**
+       * Initializes Firebase and handles authentication state.
+       */
+      async function initFirebase() {
+        try {
+          // Get Firebase config from global var
+          const firebaseConfig = JSON.parse(__firebase_config);
+          const app = initializeApp(firebaseConfig);
+          db = getFirestore(app);
+          auth = getAuth(app);
+
+          // Set Firestore log level for debugging
+          setLogLevel("Debug");
+
+          // Listen for auth state changes
+          onAuthStateChanged(auth, async (user) => {
+            if (user) {
+              // User is signed in
+              userId = user.uid;
+              loginStatus.innerHTML = `
+                            <span class="text-sm">Logged in as:</span>
+                            <span class="font-medium text-green-700 bg-green-100 px-2 py-1 rounded">${userId}</span>
+                        `;
+              authSection.classList.remove("hidden");
+              loginModal.classList.add("hidden");
+
+              // Load user-specific data
+              loadChatHistory();
+            } else {
+              // User is signed out
+              userId = null;
+              loginStatus.innerHTML = `<span class="text-sm text-gray-600">Logged in as Guest. Chat history will not be saved.</span>`;
+              authSection.classList.remove("hidden");
+              loginModal.classList.add("hidden");
+
+              // Clear user data
+              loadChatHistory();
+            }
+          });
+
+          // Sign in with custom token if available, else anonymously
+          if (
+            typeof __initial_auth_token !== "undefined" &&
+            __initial_auth_token
+          ) {
+            await signInWithCustomToken(auth, __initial_auth_token);
+          } else {
+            await signInAnonymously(auth);
+          }
+
+          // Load public data
+          subscribeToNewsCache();
+        } catch (error) {
+          console.error("Firebase Initialization Error:", error);
+          document.body.innerHTML = `<div class="p-4 bg-red-100 text-red-800 text-center">Could not initialize application. Firebase config error. ${error.message}</div>`;
+        }
+      }
+
+      /**
+       * Shows the login modal.
+       */
+      function showLoginModal() {
+        loginModal.classList.remove("hidden");
+        registerView.classList.add("hidden");
+        loginView.classList.remove("hidden");
+      }
+
+      /**
+       * Shows the admin login modal.
+       */
+      function showAdminLoginModal() {
+        adminLoginModal.classList.remove("hidden");
+      }
+
+      /**
+       * Handles guest login.
+       */
+      async function handleGuestLogin() {
+        loginModal.classList.add("hidden");
+        if (!auth.currentUser) {
+          try {
+            await signInAnonymously(auth);
+          } catch (error) {
+            console.error("Anonymous sign-in error:", error);
+            loginStatus.innerHTML = `<span class="text-red-600">Guest login failed.</span>`;
+          }
+        }
+      }
+
+      // --- Event Listeners ---
+      window.addEventListener("DOMContentLoaded", () => {
+        // Initialize Firebase
+        initFirebase();
+
+        // Navigation
+        document.querySelectorAll('a[href^="#"]').forEach((anchor) => {
+          anchor.addEventListener("click", function (e) {
+            e.preventDefault();
+            document.querySelector(this.getAttribute("href")).scrollIntoView({
+              behavior: "smooth",
+            });
+            // Close mobile menu if open
+            document.getElementById("mobile-menu").classList.add("hidden");
+          });
+        });
+
+        // Mobile menu toggle
+        document.getElementById("menu-button").addEventListener("click", () => {
+          document.getElementById("mobile-menu").classList.toggle("hidden");
+        });
+
+        // Auth buttons & Modals
+        loginButton.addEventListener("click", showLoginModal);
+        loginButtonMobile.addEventListener("click", showLoginModal);
+        closeLoginModal.addEventListener("click", () =>
+          loginModal.classList.add("hidden")
+        );
+        guestButton.addEventListener("click", handleGuestLogin);
+
+        adminLoginLink.addEventListener("click", (e) => {
+          e.preventDefault();
+          showAdminLoginModal();
+        });
+        closeAdminLoginModal.addEventListener("click", () =>
+          adminLoginModal.classList.add("hidden")
+        );
+
+        // Login/Register View Toggle
+        showRegisterLink.addEventListener("click", (e) => {
+          e.preventDefault();
+          loginView.classList.add("hidden");
+          registerView.classList.remove("hidden");
+        });
+        showLoginLink.addEventListener("click", (e) => {
+          e.preventDefault();
+          registerView.classList.add("hidden");
+          loginView.classList.remove("hidden");
+        });
+
+        // Forms
+        loginForm.addEventListener("submit", (e) => {
+          e.preventDefault();
+          // Placeholder for real email/passkey login
+          showNotification("Login successful! (Demo)", "success");
+          loginModal.classList.add("hidden");
+        });
+
+        registerForm.addEventListener("submit", (e) => {
+          e.preventDefault();
+          // Placeholder for full registration flow
+          // In a real app, this would call createUserWithEmailAndPassword,
+          // then save the extra user data to a Firestore doc.
+          showNotification(
+            "Registration successful! (Demo). Please login.",
+            "success"
+          );
+          registerView.classList.add("hidden");
+          loginView.classList.remove("hidden");
+        });
+
+        document.getElementById("otp-button").addEventListener("click", () => {
+          showNotification("OTP sent to your mobile! (Demo)", "success");
+        });
+
+        // AI Vaidya Chat
+        chatSendButton.addEventListener("click", handleChatSend);
+        chatInput.addEventListener("keydown", (e) => {
+          if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            handleChatSend();
+          }
+        });
+
+        // Herb Scanner
+        herbImageButton.addEventListener("click", handleHerbScan);
+        herbImageInput.addEventListener("change", (e) => {
+          if (e.target.files && e.target.files[0]) {
+            const file = e.target.files[0];
+            // Show a temporary preview
+            const reader = new FileReader();
+            reader.onload = (ev) => {
+              herbImagePreview.src = ev.target.result;
+              herbImagePreview.classList.remove("hidden");
+            };
+            reader.readAsDataURL(file);
+            herbResult.innerHTML = ""; // Clear previous result
+          }
+        });
+
+        // Telemedicine Modal
+        document
+          .getElementById("telemedicine-button")
+          .addEventListener("click", () => {
+            telemedicineModal.classList.remove("hidden");
+            // Reset currency converter
+            convertedPrice.textContent = "";
+            currencySelect.value = "";
+          });
+        closeTelemedicineModal.addEventListener("click", () => {
+          telemedicineModal.classList.add("hidden");
+        });
+        document
+          .getElementById("payment-form")
+          .addEventListener("submit", (e) => {
+            e.preventDefault();
+            telemedicineModal.classList.add("hidden");
+            showNotification(
+              "Payment Successful! Your consultation is booked.",
+              "success"
+            );
+          });
+
+        // Currency Converter
+        convertCurrencyButton.addEventListener(
+          "click",
+          handleCurrencyConversion
+        );
+      });
+    </script>
+
+    <style>
+      body {
+        font-family: "Inter", sans-serif;
+        scroll-behavior: smooth;
+      }
+
+      /* Custom scrollbar for chat */
+      #chat-messages::-webkit-scrollbar {
+        width: 6px;
+      }
+
+      #chat-messages::-webkit-scrollbar-track {
+        background: #f1f5f9;
+        border-radius: 10px;
+      }
+
+      #chat-messages::-webkit-scrollbar-thumb {
+        background: #94a3b8;
+        border-radius: 10px;
+      }
+
+      #chat-messages::-webkit-scrollbar-thumb:hover {
+        background: #475569;
+      }
+
+      /* Glowing effect */
+      .hero-glow {
+        animation: hero-glow-anim 5s ease-in-out infinite;
+      }
+
+      @keyframes hero-glow-anim {
+        0% {
+          box-shadow: 0 0 20px rgba(52, 211, 153, 0.3),
+            0 0 40px rgba(52, 211, 153, 0.2);
+        }
+        50% {
+          box-shadow: 0 0 30px rgba(52, 211, 153, 0.5),
+            0 0 50px rgba(52, 211, 153, 0.4);
+        }
+        100% {
+          box-shadow: 0 0 20px rgba(52, 211, 153, 0.3),
+            0 0 40px rgba(52, 211, 153, 0.2);
+        }
+      }
+
+      .btn-glow {
+        transition: all 0.3s ease;
+      }
+
+      .btn-glow:hover {
+        box-shadow: 0 0 15px rgba(22, 163, 74, 0.4),
+          0 0 5px rgba(22, 163, 74, 0.2);
+      }
+
+      /* Custom styles for modal content scrolling */
+      .modal-body {
+        max-height: 70vh;
+        overflow-y: auto;
+      }
+
+      /* Styles for new content sections */
+      .content-section h2 {
+        font-size: 2.25rem; /* text-4xl */
+        font-weight: 800; /* font-extrabold */
+        text-align: center;
+        margin-bottom: 3rem; /* mb-12 */
+        color: #1f2937; /* text-gray-800 */
+      }
+
+      .content-section h3 {
+        font-size: 1.25rem; /* text-xl */
+        font-weight: 700; /* font-bold */
+        color: #111827; /* text-gray-900 */
+        margin-top: 1.5rem; /* mt-6 */
+        margin-bottom: 0.5rem; /* mb-2 */
+      }
+
+      .content-section p,
+      .content-section li,
+      .content-section dd {
+        line-height: 1.75; /* leading-relaxed */
+        color: #4b5563; /* text-gray-600 */
+        margin-bottom: 1rem; /* mb-4 */
+      }
+
+      .content-section dt {
+        font-weight: 700; /* font-bold */
+        color: #1f2937; /* text-gray-800 */
+        margin-bottom: 0.5rem; /* mb-2 */
+      }
+    </style>
+  </head>
+
+  <body class="bg-gray-50 text-gray-900">
+    <!-- Header -->
+    <header class="bg-white/80 backdrop-blur-md shadow-sm sticky top-0 z-50">
+      <nav class="container mx-auto px-4 sm:px-6 lg:px-8">
+        <div class="flex justify-between items-center h-16">
+          <!-- Logo -->
+          <a href="#home" class="flex items-center gap-2">
+            <svg
+              class="w-8 h-8 text-green-600"
+              width="24"
+              height="24"
+              viewBox="0 0 24 24"
+              fill="none"
+              xmlns="http://www.w3.org/2000/svg"
+            >
+              <path
+                d="M12 2C6.48 2 2 6.48 2 12C2 17.52 6.48 22 12 22C17.52 22 22 17.52 22 12C22 6.48 17.52 2 12 2ZM16.14 17.5C15.82 17.82 15.22 17.96 14.7 17.72C12.4 16.34 9.6 16.04 7.02 16.84C6.5 17 6 16.64 5.86 16.12C5.72 15.6 6.08 15.1 6.6 14.96C9.52 14.06 12.68 14.38 15.34 15.98C15.82 16.28 16.02 16.88 15.72 17.36C15.7 17.38 15.68 17.4 15.66 17.42L16.14 17.5ZM17.84 14.22C17.5 14.66 16.78 14.82 16.14 14.5C13.26 12.78 8.96 12.3 6.84 13.16C6.2 13.4 5.56 13.02 5.32 12.38C5.08 11.74 5.46 11.1 6.1 10.86C8.66 9.86 13.56 10.42 16.98 12.5C17.6 12.82 17.9 13.54 17.56 14.18L17.84 14.22ZM17.92 10.82C14.24 8.78 8.48 8.6 6.7 9.34C5.94 9.62 5.18 9.16 4.9 8.4C4.62 7.64 5.08 6.88 5.84 6.6C8.06 5.7 14.42 5.9 18.76 8.36C19.46 8.74 19.72 9.62 19.34 10.32C18.96 11.02 18.08 11.28 17.38 10.9L17.92 10.82Z"
+                fill="currentColor"
+              />
+            </svg>
+            <span class="text-xl font-bold text-green-700"
+              >ChitraHarsha
+              <span class="font-light text-gray-600">AyurTech</span></span
+            >
+          </a>
+
+          <!-- Desktop Navigation -->
+          <div class="hidden md:flex md:items-center md:gap-8">
+            <a
+              href="#home"
+              class="text-gray-600 hover:text-green-600 font-medium"
+              >Home</a
+            >
+            <a
+              href="#ai-vaidya"
+              class="text-gray-600 hover:text-green-600 font-medium"
+              >AI Vaidya</a
+            >
+            <a
+              href="#scanner"
+              class="text-gray-600 hover:text-green-600 font-medium"
+              >Herb Scanner</a
+            >
+            <a
+              href="#telemedicine"
+              class="text-gray-600 hover:text-green-600 font-medium"
+              >Telemedicine</a
+            >
+            <a
+              href="#news"
+              class="text-gray-600 hover:text-green-600 font-medium"
+              >News</a
+            >
+            <a
+              href="#about"
+              class="text-gray-600 hover:text-green-600 font-medium"
+              >About</a
+            >
+            <a
+              href="#faqs"
+              class="text-gray-600 hover:text-green-600 font-medium"
+              >FAQs</a
+            >
+            <button
+              id="login-button"
+              class="bg-green-600 text-white px-4 py-2 rounded-lg font-medium shadow-sm hover:bg-green-700 btn-glow transition-all"
+            >
+              Login / Register
+            </button>
+          </div>
+
+          <!-- Mobile Menu Button -->
+          <div class="md:hidden">
+            <button id="menu-button" class="text-gray-600 hover:text-green-600">
+              <i data-lucide="menu" class="w-6 h-6"></i>
+            </button>
+          </div>
+        </div>
+
+        <!-- Mobile Menu -->
+        <div id="mobile-menu" class="md:hidden hidden">
+          <a
+            href="#home"
+            class="block py-2 px-4 text-sm text-gray-600 hover:bg-green-50"
+            >Home</a
+          >
+          <a
+            href="#ai-vaidya"
+            class="block py-2 px-4 text-sm text-gray-600 hover:bg-green-50"
+            >AI Vaidya</a
+          >
+          <a
+            href="#scanner"
+            class="block py-2 px-4 text-sm text-gray-600 hover:bg-green-50"
+            >Herb Scanner</a
+          >
+          <a
+            href="#telemedicine"
+            class="block py-2 px-4 text-sm text-gray-600 hover:bg-green-50"
+            >Telemedicine</a
+          >
+          <a
+            href="#news"
+            class="block py-2 px-4 text-sm text-gray-600 hover:bg-green-50"
+            >News</a
+          >
+          <a
+            href="#about"
+            class="block py-2 px-4 text-sm text-gray-600 hover:bg-green-50"
+            >About</a
+          >
+          <a
+            href="#faqs"
+            class="block py-2 px-4 text-sm text-gray-600 hover:bg-green-50"
+            >FAQs</a
+          >
+          <button
+            id="login-button-mobile"
+            class="w-full text-left block py-2 px-4 text-sm text-white bg-green-600 rounded-lg my-2"
+          >
+            Login / Register
+          </button>
+        </div>
+      </nav>
+    </header>
+
+    <!-- Main Content -->
+    <main>
+      <!-- Auth Status Bar -->
+      <div
+        id="auth-section"
+        class="hidden bg-indigo-50 border-b border-indigo-200"
+      >
+        <div
+          class="container mx-auto px-4 sm:px-6 lg:px-8 py-2 flex justify-center items-center"
+        >
+          <div id="login-status" class="flex items-center gap-2">
+            <!-- Status will be injected by JS -->
+          </div>
+        </div>
+      </div>
+
+      <!-- Hero Section -->
+      <section
+        id="home"
+        class="relative bg-gradient-to-b from-green-50 to-gray-50 pt-20 pb-32 overflow-hidden"
+      >
+        <div
+          class="container mx-auto px-4 sm:px-6 lg:px-8 text-center relative z-10"
+        >
+          <div
+            class="absolute -top-20 -left-40 w-96 h-96 bg-green-200 rounded-full opacity-20 filter blur-3xl animate-pulse"
+          ></div>
+          <div
+            class="absolute -bottom-40 -right-40 w-96 h-96 bg-indigo-200 rounded-full opacity-20 filter blur-3xl animate-pulse"
+            style="animation-delay: 2s"
+          ></div>
+
+          <h1 class="text-4xl md:text-6xl font-extrabold text-green-800 mb-6">
+            Ancient Wisdom, Modern Intelligence.
+          </h1>
+          <p class="text-lg md:text-xl text-gray-700 max-w-3xl mx-auto mb-10">
+            Welcome to
+            <span class="font-bold text-green-700">ChitraHarsha AyurTech</span>,
+            your "Made in India" platform for holistic wellness. We unite the
+            timeless knowledge of Ayurveda with the power of advanced AI to
+            guide your journey to health.
+          </p>
+          <div class="flex justify-center gap-4">
+            <a
+              href="#ai-vaidya"
+              class="bg-green-600 text-white px-8 py-3 rounded-lg font-medium text-lg shadow-lg hover:bg-green-700 btn-glow transition-all transform hover:scale-105"
+            >
+              Chat with AI Vaidya
+            </a>
+            <a
+              href="#telemedicine"
+              class="bg-white text-green-600 border border-green-600 px-8 py-3 rounded-lg font-medium text-lg shadow-sm hover:bg-green-50 transition-all transform hover:scale-105"
+            >
+              Consult an Expert
+            </a>
+          </div>
+        </div>
+      </section>
+
+      <!-- Core Features Section -->
+      <section id="features" class="py-24 bg-white">
+        <div class="container mx-auto px-4 sm:px-6 lg:px-8">
+          <h2 class="text-3xl font-bold text-center text-gray-800 mb-16">
+            An All-in-One Ayurvedic Ecosystem
+          </h2>
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-8">
+            <!-- Feature 1: AI Diagnosis -->
+            <div
+              class="bg-gray-50 p-6 rounded-lg shadow-sm border border-gray-200 text-center"
+            >
+              <div
+                class="p-3 bg-green-100 text-green-600 rounded-full w-16 h-16 mx-auto flex items-center justify-center mb-4"
+              >
+                <i data-lucide="brain-circuit" class="w-8 h-8"></i>
+              </div>
+              <h3 class="text-xl font-semibold mb-2">AI-Powered Guidance</h3>
+              <p class="text-gray-600">
+                Our advanced NLP & AI models provide preliminary insights based
+                on Ayurvedic principles.
+              </p>
+            </div>
+            <!-- Feature 2: Telemedicine -->
+            <div
+              class="bg-gray-50 p-6 rounded-lg shadow-sm border border-gray-200 text-center"
+            >
+              <div
+                class="p-3 bg-green-100 text-green-600 rounded-full w-16 h-16 mx-auto flex items-center justify-center mb-4"
+              >
+                <i data-lucide="video" class="w-8 h-8"></i>
+              </div>
+              <h3 class="text-xl font-semibold mb-2">Expert Telemedicine</h3>
+              <p class="text-gray-600">
+                Connect with verified Ayurvedic practitioners for live, secure
+                video consultations.
+              </p>
+            </div>
+            <!-- Feature 3: Secure Data -->
+            <div
+              class="bg-gray-50 p-6 rounded-lg shadow-sm border border-gray-200 text-center"
+            >
+              <div
+                class="p-3 bg-green-100 text-green-600 rounded-full w-16 h-16 mx-auto flex items-center justify-center mb-4"
+              >
+                <i data-lucide="shield-check" class="w-8 h-8"></i>
+              </div>
+              <h3 class="text-xl font-semibold mb-2">Secure Health Records</h3>
+              <p class="text-gray-600">
+                Your data is protected with blockchain-inspired encryption on
+                government-compliant cloud servers.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- AI Vaidya Chat Section -->
+      <section id="ai-vaidya" class="py-24 bg-green-50/50">
+        <div class="container mx-auto px-4 sm:px-6 lg:px-8">
+          <h2 class="text-3xl font-bold text-center text-gray-800 mb-4">
+            Chat with your AI Vaidya
+          </h2>
+          <p class="text-center text-gray-600 mb-12 max-w-2xl mx-auto">
+            Ask questions about your wellness, get insights into your doshas,
+            and discover Ayurvedic lifestyle tips. Your conversation is private
+            and secure.
+          </p>
+
+          <div
+            class="max-w-3xl mx-auto bg-white rounded-xl shadow-2xl border border-gray-200 overflow-hidden"
+          >
+            <!-- Chat Messages -->
+            <div
+              id="chat-messages"
+              class="h-96 overflow-y-auto p-6 space-y-4 flex flex-col"
+            >
+              <!-- Messages will be injected by JS -->
+            </div>
+
+            <!-- Loading Indicator -->
+            <div id="chat-loading" class="hidden px-6 pb-2">
+              <div class="flex items-center gap-2 text-gray-500">
+                <div
+                  class="w-2 h-2 bg-green-500 rounded-full animate-pulse"
+                  style="animation-delay: 0s"
+                ></div>
+                <div
+                  class="w-2 h-2 bg-green-500 rounded-full animate-pulse"
+                  style="animation-delay: 0.2s"
+                ></div>
+                <div
+                  class="w-2 h-2 bg-green-500 rounded-full animate-pulse"
+                  style="animation-delay: 0.4s"
+                ></div>
+                <span class="text-sm">AyurVaidya is thinking...</span>
+              </div>
+            </div>
+
+            <!-- Chat Input -->
+            <div class="p-4 bg-gray-100 border-t border-gray-200">
+              <div class="flex items-center gap-3">
+                <input
+                  type="text"
+                  id="chat-input"
+                  class="flex-1 w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500"
+                  placeholder="Ask about Ayurveda, e.g., 'What is pitta dosha?'"
+                />
+                <button
+                  id="chat-send-button"
+                  class="bg-green-600 text-white p-3 rounded-lg shadow-sm hover:bg-green-700 transition-all btn-glow disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <i data-lucide="send-horizontal" class="w-6 h-6"></i>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Herb Scanner Section -->
+      <section id="scanner" class="py-24 bg-white">
+        <div class="container mx-auto px-4 sm:px-6 lg:px-8">
+          <div class="grid grid-cols-1 lg:grid-cols-2 gap-16 items-center">
+            <!-- Left Column: Upload -->
+            <div>
+              <h2 class="text-3xl font-bold text-gray-800 mb-4">
+                Ayurvedic Herb Scanner
+              </h2>
+              <p class="text-gray-600 mb-8">
+                Got a plant you don't recognize? Upload a photo, and our AI
+                (powered by Gemini Vision) will identify its Ayurvedic
+                properties, just like Google Lens but for herbs.
+              </p>
+
+              <div
+                class="bg-gray-50 border-2 border-dashed border-gray-300 rounded-lg p-8 text-center"
+              >
+                <input
+                  type="file"
+                  id="herb-image-input"
+                  class="hidden"
+                  accept="image/*"
+                />
+                <label
+                  for="herb-image-input"
+                  class="cursor-pointer bg-white text-green-600 font-medium px-6 py-3 rounded-lg border border-green-600 hover:bg-green-50 transition-all"
+                >
+                  <i
+                    data-lucide="upload-cloud"
+                    class="w-5 h-5 inline-block -mt-1 mr-2"
+                  ></i>
+                  Choose an Image
+                </label>
+                <p class="text-sm text-gray-500 mt-4">
+                  PNG, JPG, or WEBP. Max 5MB.
+                </p>
+
+                <button
+                  id="herb-image-button"
+                  class="mt-6 w-full bg-green-600 text-white px-8 py-3 rounded-lg font-medium text-lg shadow-lg hover:bg-green-700 btn-glow transition-all disabled:opacity-50"
+                >
+                  Identify Herb
+                </button>
+
+                <!-- Loading Indicator -->
+                <div id="herb-loading" class="hidden mt-4 text-center">
+                  <div
+                    class="flex items-center justify-center gap-2 text-gray-600"
+                  >
+                    <i
+                      data-lucide="loader-circle"
+                      class="w-5 h-5 animate-spin"
+                    ></i>
+                    <span>Analyzing image...</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Right Column: Result -->
+            <div class="bg-white rounded-lg shadow-lg border border-gray-200">
+              <div
+                class="h-64 bg-gray-100 rounded-t-lg flex items-center justify-center"
+              >
+                <img
+                  id="herb-image-preview"
+                  src=""
+                  alt="Herb Preview"
+                  class="hidden h-full w-full object-cover rounded-t-lg"
+                />
+                <div id="herb-preview-placeholder" class_="text-gray-400">
+                  <i data-lucide="image" class="w-16 h-16 mx-auto"></i>
+                  <p>Image preview will appear here</p>
+                </div>
+              </div>
+              <div id="herb-result" class="p-6 min-h-[200px]">
+                <p class="text-gray-500">
+                  Identification results will be shown here.
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Telemedicine / Freemium Section -->
+      <section id="telemedicine" class="py-24 bg-gray-50">
+        <div class="container mx-auto px-4 sm:px-6 lg:px-8 text-center">
+          <h2 class="text-3xl font-bold text-gray-800 mb-4">
+            Expert Tele-Consultation
+          </h2>
+          <p class="text-lg text-gray-600 max-w-2xl mx-auto mb-10">
+            Our "Freemium" model gives you free access to the AI Vaidya and
+            Knowledge Base. For personalized, in-depth diagnosis and treatment
+            plans, book a secure consultation with a verified practitioner.
+          </p>
+          <button
+            id="telemedicine-button"
+            class="bg-indigo-600 text-white px-10 py-4 rounded-lg font-medium text-lg shadow-lg hover:bg-indigo-700 transition-all transform hover:scale-105 btn-glow"
+            style="--glow-color: rgba(99, 102, 241, 0.4)"
+          >
+            <i data-lucide="video" class="w-5 h-5 inline-block -mt-1 mr-2"></i>
+            Book a Consultation Now
+          </button>
+        </div>
+      </section>
+
+      <!-- Latest News Section (Google Search) -->
+      <section id="news" class="py-24 bg-white">
+        <div class="container mx-auto px-4 sm:px-6 lg:px-8">
+          <h2 class="text-3xl font-bold text-center text-gray-800 mb-12">
+            Latest in Ayurvedic News & Research
+          </h2>
+
+          <!-- Loading Indicator -->
+          <div id="news-loading" class="text-center">
+            <div class="flex items-center justify-center gap-2 text-gray-600">
+              <i data-lucide="loader-circle" class="w-6 h-6 animate-spin"></i>
+              <span>Fetching latest articles...</span>
+            </div>
+          </div>
+
+          <!-- News Grid -->
+          <div id="news-grid" class="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <!-- News articles will be injected by JS -->
+          </div>
+        </div>
+      </section>
+
+      <!-- About Section -->
+      <section id="about" class="py-24 bg-gray-50">
+        <div class="container mx-auto px-4 sm:px-6 lg:px-8">
+          <div class="max-w-4xl mx-auto">
+            <h2 class="text-3xl font-bold text-center text-gray-800 mb-8">
+              About ChitraHarsha AyurTech
+            </h2>
+            <div
+              class="space-y-6 text-gray-700 text-left bg-white p-8 rounded-lg shadow-md border"
+            >
+              <p>
+                <strong>ChitraHarsha AyurTech</strong> is a "Made in India"
+                initiative born from the vision of combining the profound wisdom
+                of ancient Ayurveda with the transformative power of modern
+                technology. Our name, blending "Chitra" (चित्र) meaning 'bright'
+                or 'multi-faceted' and "Harsha" (हर्ष) meaning 'joy' or
+                'delight', reflects our mission: to bring the bright, joyful,
+                and multi-faceted benefits of holistic health to everyone.
+              </p>
+              <p>
+                We are building a comprehensive, future-ready ecosystem for
+                commercial use, grounded in compliance with all Indian
+                Government, Ministry of AYUSH, and data privacy regulations. Our
+                platform leverages advanced AI/ML models, NLP, and a secure
+                cloud infrastructure (powered by Google Cloud and BigQuery for
+                large-scale data analytics) to deliver a seamless user
+                experience.
+              </p>
+              <p>
+                Our commitment to security is paramount. We employ high-level
+                security protocols, including enterprise-grade firewalls, active
+                malware and phishing monitoring, and end-to-end encryption. Our
+                systems are designed in compliance with global web standards and
+                data protection regulations to ensure your information is safe.
+              </p>
+              <p>
+                From our AI Vaidya chatbot and innovative Herb Scanner to our
+                secure tele-consultation service and practitioner network, every
+                feature is designed to be accessible, reliable, and
+                user-friendly. We are committed to data integrity, using
+                blockchain-inspired principles for encryption, and ensuring our
+                platform is ready for the future with scalable architecture.
+              </p>
+              <p class="font-semibold text-green-700">
+                Join us in this revolution to make ancient wisdom accessible for
+                modern well-being.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- New Section: FAQs -->
+      <section id="faqs" class="py-24 bg-white content-section">
+        <div class="container mx-auto px-4 sm:px-6 lg:px-8 max-w-4xl">
+          <h2>Frequently Asked Questions</h2>
+          <dl class="space-y-8">
+            <div>
+              <dt>Is the AI Vaidya a replacement for a real doctor?</dt>
+              <dd>
+                <strong>No. Absolutely not.</strong> The AI Vaidya is an
+                informational tool designed to provide general guidance on
+                Ayurvedic principles, lifestyle, and remedies for common,
+                non-serious concerns. It is not a medical professional and
+                cannot diagnose conditions, prescribe treatment, or replace a
+                consultation with a qualified healthcare provider.
+              </dd>
+            </div>
+            <div>
+              <dt>How is my personal and health data protected?</dt>
+              <dd>
+                We take your privacy very seriously. All personal data is stored
+                on secure, encrypted Google Cloud servers, compliant with Indian
+                data laws. We use blockchain-inspired principles for data
+                integrity and employ active security monitoring. We will never
+                sell your personal health information. Please see our full
+                <a href="#privacy" class="text-green-600 hover:underline"
+                  >Privacy Policy</a
+                >
+                for details.
+              </dd>
+            </div>
+            <div>
+              <dt>How does the "Freemium" model work?</dt>
+              <dd>
+                Our freemium model gives you free access to all our AI-powered
+                tools, including the AI Vaidya chat, the Herb Scanner, and our
+                knowledge base. This allows you to explore and learn about
+                Ayurveda at no cost. For services that require a certified
+                professional, such as one-on-one video consultations for
+                diagnosis and treatment, we charge a fee.
+              </dd>
+            </div>
+            <div>
+              <dt>
+                Are the practitioners on the telemedicine platform certified?
+              </dt>
+              <dd>
+                Yes. We have a strict verification process. All Ayurvedic
+                practitioners available for telemedicine consultations are
+                required to provide valid certifications (such as a B.A.M.S.
+                degree) and proof of registration with the relevant government
+                bodies, like the Ministry of AYUSH.
+              </dd>
+            </div>
+            <div>
+              <dt>How accurate is the Ayurvedic Herb Scanner?</dt>
+              <dd>
+                Our Herb Scanner uses advanced AI vision models (Gemini) trained
+                on a vast database of plants. While it is highly accurate, its
+                identification can be affected by image quality, lighting, and
+                the angle. The information provided is for educational purposes.
+                You must consult a qualified expert before consuming any plant
+                or herb.
+              </dd>
+            </div>
+          </dl>
+        </div>
+      </section>
+
+      <!-- New Section: Privacy Policy -->
+      <section id="privacy" class="py-24 bg-gray-50 content-section">
+        <div class="container mx-auto px-4 sm:px-6 lg:px-8 max-w-4xl">
+          <h2>Privacy Policy</h2>
+          <p>Last updated: November 1, 2025</p>
+
+          <h3>1. Our Commitment</h3>
+          <p>
+            ChitraHarsha AyurTech ("we," "us," "our") is committed to protecting
+            your privacy. This policy outlines how we collect, use, and
+            safeguard your information when you use our platform, in full
+            compliance with India's data protection laws.
+          </p>
+
+          <h3>2. Information We Collect</h3>
+          <p>
+            <strong>- Account Data:</strong> When you register, we collect
+            information like your name, email, mobile number, address, and (if
+            provided for job applications) professional details.
+            <br />
+            <strong>- Health & Wellness Data:</strong> Information you
+            voluntarily provide to the AI Vaidya or a telemedicine practitioner
+            (e.g., symptoms, lifestyle habits). This is treated as highly
+            sensitive data.
+            <br />
+            <strong>- Technical Data:</strong> Anonymous usage data, device
+            type, and IP address to improve our service and ensure security.
+          </p>
+
+          <h3>3. How We Use Your Information</h3>
+          <p>
+            - To provide and personalize our services (e.g., maintain your chat
+            history, connect you with a doctor).
+            <br />
+            - To process payments for services.
+            <br />
+            - To improve our AI models (all data used for training is anonymized
+            and aggregated).
+            <br />
+            - To manage job applications.
+            <br />
+            - To communicate with you about your account or services.
+            <br />
+            <strong
+              >We will never sell your personal health data to third-party
+              advertisers.</strong
+            >
+          </p>
+
+          <h3>4. Data Security</h3>
+          <p>
+            We implement state-of-the-art security measures, including:
+            <br />
+            - End-to-end encryption for all data in transit and at rest.
+            <br />
+            - Secure storage on Google Cloud Platform, compliant with government
+            regulations.
+            <br />
+            - Active threat detection, including malware and phishing
+            monitoring.
+            <br />
+            - Regular security audits and adherence to safe browsing standards.
+          </p>
+
+          <h3>5. Your Rights</h3>
+          <p>
+            You have the right to access, correct, or delete your personal
+            information. You can manage most of this from your account settings
+            or by contacting us at
+            <a
+              href="mailto:privacy@chitraharsha.com"
+              class="text-green-600 hover:underline"
+              >privacy@chitraharsha.com</a
+            >.
+          </p>
+        </div>
+      </section>
+
+      <!-- New Section: Terms & Conditions -->
+      <section id="terms" class="py-24 bg-white content-section">
+        <div class="container mx-auto px-4 sm:px-6 lg:px-8 max-w-4xl">
+          <h2>Terms & Conditions</h2>
+          <p>Last updated: November 1, 2025</p>
+
+          <h3>1. Acceptance of Terms</h3>
+          <p>
+            By accessing or using the ChitraHarsha AyurTech platform, you agree
+            to be bound by these Terms & Conditions and our Privacy Policy.
+          </p>
+
+          <h3>2. CRITICAL: Medical Disclaimer</h3>
+          <p>
+            <strong
+              >All content and services provided, including the AI Vaidya, are
+              for informational and educational purposes ONLY. They do not
+              constitute medical advice, diagnosis, or treatment.</strong
+            >
+            Always seek the advice of a qualified healthcare professional or
+            your own physician with any questions you may have regarding a
+            medical condition. Never disregard professional medical advice or
+            delay in seeking it because of something you have read or heard on
+            this platform.
+          </p>
+
+          <h3>3. User Accounts</h3>
+          <p>
+            You are responsible for maintaining the confidentiality of your
+            account and password. If you are registering for a job role, you
+            affirm that all information provided is true and accurate. We
+            reserve the right to terminate accounts that violate these terms.
+          </p>
+
+          <h3>4. Freemium Services and Payments</h3>
+          <p>
+            Access to AI tools is free. Paid services, such as telemedicine
+            consultations, are billed at the time of booking. All payments are
+            final. The currency converter provides an estimate, and final
+            charges may vary slightly based on your bank's exchange rates.
+          </p>
+
+          <h3>5. Governing Law</h3>
+          <p>
+            These Terms shall be governed by and construed in accordance with
+            the laws of India, and you submit to the exclusive jurisdiction of
+            the courts in [Your City, e.g., New Delhi], India.
+          </p>
+        </div>
+      </section>
+
+      <!-- Get in Touch Section -->
+      <section id="contact" class="py-24 bg-green-700 text-white">
+        <div class="container mx-auto px-4 sm:px-6 lg:px-8">
+          <div class="max-w-3xl mx-auto text-center">
+            <h2 class="text-3xl font-bold mb-4">Get in Touch</h2>
+            <p class="text-green-100 mb-8">
+              Have questions, feedback, or want to partner with us? We'd love to
+              hear from you.
+            </p>
+            <form class="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <input
+                type="text"
+                placeholder="Your Name"
+                class="p-3 rounded-lg bg-white/90 text-gray-900 focus:outline-none focus:ring-2 focus:ring-white"
+              />
+              <input
+                type="email"
+                placeholder="Your Email"
+                class="p-3 rounded-lg bg-white/90 text-gray-900 focus:outline-none focus:ring-2 focus:ring-white"
+              />
+              <textarea
+                placeholder="Your Message"
+                rows="5"
+                class="md:col-span-2 p-3 rounded-lg bg-white/90 text-gray-900 focus:outline-none focus:ring-2 focus:ring-white"
+              ></textarea>
+              <button
+                type="submit"
+                class="md:col-span-2 bg-white text-green-700 px-8 py-3 rounded-lg font-medium text-lg shadow-lg hover:bg-green-50 transition-all"
+              >
+                Send Message
+              </button>
+            </form>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- Footer -->
+    <footer class="bg-gray-800 text-gray-300 py-16">
+      <div class="container mx-auto px-4 sm:px-6 lg:px-8">
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-8">
+          <!-- About -->
+          <div>
+            <h4 class="text-lg font-semibold text-white mb-4">
+              ChitraHarsha AyurTech
+            </h4>
+            <p class="text-sm text-gray-400 mb-4">
+              Revitalizing ancient Indian medicine with the power of modern AI.
+              A proud "Made in India" platform.
+            </p>
+            <div class="flex gap-4">
+              <a href="#" class="text-gray-400 hover:text-white"
+                ><i data-lucide="twitter" class="w-5 h-5"></i
+              ></a>
+              <a href="#" class="text-gray-400 hover:text-white"
+                ><i data-lucide="facebook" class="w-5 h-5"></i
+              ></a>
+              <a href="#" class="text-gray-400 hover:text-white"
+                ><i data-lucide="linkedin" class="w-5 h-5"></i
+              ></a>
+              <a href="#" class="text-gray-400 hover:text-white"
+                ><i data-lucide="instagram" class="w-5 h-5"></i
+              ></a>
+            </div>
+          </div>
+          <!-- Quick Links -->
+          <div>
+            <h4 class="text-lg font-semibold text-white mb-4">Quick Links</h4>
+            <ul class="space-y-2">
+              <li>
+                <a href="#home" class="text-sm text-gray-400 hover:text-white"
+                  >Home</a
+                >
+              </li>
+              <li>
+                <a
+                  href="#ai-vaidya"
+                  class="text-sm text-gray-400 hover:text-white"
+                  >AI Vaidya</a
+                >
+              </li>
+              <li>
+                <a
+                  href="#telemedicine"
+                  class="text-sm text-gray-400 hover:text-white"
+                  >Consultations</a
+                >
+              </li>
+              <li>
+                <a
+                  href="#scanner"
+                  class="text-sm text-gray-400 hover:text-white"
+                  >Herb Scanner</a
+                >
+              </li>
+            </ul>
+          </div>
+          <!-- Legal & Support -->
+          <div>
+            <h4 class="text-lg font-semibold text-white mb-4">
+              Legal & Support
+            </h4>
+            <ul class="space-y-2">
+              <li>
+                <a href="#faqs" class="text-sm text-gray-400 hover:text-white"
+                  >FAQs</a
+                >
+              </li>
+              <li>
+                <a
+                  href="#privacy"
+                  class="text-sm text-gray-400 hover:text-white"
+                  >Privacy Policy</a
+                >
+              </li>
+              <li>
+                <a href="#terms" class="text-sm text-gray-400 hover:text-white"
+                  >Terms & Conditions</a
+                >
+              </li>
+              <li>
+                <a
+                  href="#contact"
+                  class="text-sm text-gray-400 hover:text-white"
+                  >Contact Us</a
+                >
+              </li>
+              <li>
+                <a
+                  href="#"
+                  id="admin-login-link"
+                  class="text-sm text-gray-400 hover:text-white"
+                  >Corporate & Admin Login</a
+                >
+              </li>
+            </ul>
+          </div>
+          <!-- Tech Stack -->
+          <div>
+            <h4 class="text-lg font-semibold text-white mb-4">
+              Our Technology
+            </h4>
+            <ul class="space-y-2 text-sm text-gray-400">
+              <li>AI/ML & Advanced NLP</li>
+              <li>Google Cloud & BigQuery Support</li>
+              <li>Blockchain-Encrypted Records</li>
+              <li>10 Trillion+ SQL Support</li>
+              <li>Dark Web & Malware Monitoring</li>
+              <li>Phishing Protection</li>
+              <li>Safe Browsing & Web Standards</li>
+              <li>Quantum-Ready Architecture</li>
+              <li>
+                <a href="#" class="hover:text-white"
+                  >Download Client (Win/Mac/Linux)</a
+                >
+              </li>
+            </ul>
+          </div>
+        </div>
+        <div
+          class="border-t border-gray-700 mt-12 pt-8 text-center text-sm text-gray-500"
+        >
+          <p>
+            &copy; 2025 ChitraHarsha AyurTech (VPK Ventures). All rights
+            reserved.
+          </p>
+          <p class="mt-1">
+            Compliant with Indian Government & Ministry of AYUSH guidelines.
+          </p>
+        </div>
+      </div>
+    </footer>
+
+    <!-- Modals -->
+
+    <!-- Login/Register Modal -->
+    <div
+      id="login-modal"
+      class="hidden fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+    >
+      <div class="bg-white rounded-lg shadow-2xl w-full max-w-lg relative">
+        <button
+          id="close-login-modal"
+          class="absolute top-4 right-4 text-gray-500 hover:text-gray-800"
+        >
+          <i data-lucide="x" class="w-6 h-6"></i>
+        </button>
+
+        <!-- Login View -->
+        <div id="login-view" class="p-8">
+          <h3 class="text-2xl font-bold text-gray-800 text-center mb-6">
+            Welcome Back
+          </h3>
+          <form id="login-form" class="space-y-4">
+            <input
+              type="email"
+              placeholder="Email or Mobile"
+              class="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500"
+              required
+            />
+            <input
+              type="password"
+              placeholder="Password"
+              class="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500"
+              required
+            />
+
+            <div class="flex items-center justify-between">
+              <a href="#" class="text-sm text-green-600 hover:underline"
+                >Forgot Password?</a
+              >
+              <button
+                type="button"
+                class="text-sm text-indigo-600 hover:underline"
+              >
+                Login with Passkey
+                <i
+                  data-lucide="key-round"
+                  class="w-4 h-4 inline-block ml-1"
+                ></i>
+              </button>
+            </div>
+
+            <button
+              type="submit"
+              class="w-full bg-green-600 text-white p-3 rounded-lg font-medium text-lg hover:bg-green-700 btn-glow transition-all"
+            >
+              Login
+            </button>
+          </form>
+
+          <div class="flex items-center my-6">
+            <hr class="flex-1 border-gray-300" />
+            <span class="px-4 text-gray-500 text-sm">OR</span>
+            <hr class="flex-1 border-gray-300" />
+          </div>
+
+          <button
+            id="guest-button"
+            class="w-full bg-gray-600 text-white p-3 rounded-lg font-medium hover:bg-gray-700 transition-all"
+          >
+            Continue as Guest
+          </button>
+          <p class="text-center text-sm mt-4">
+            New user?
+            <a
+              href="#"
+              id="show-register-link"
+              class="text-green-600 font-medium hover:underline"
+              >Create an Account</a
+            >
+          </p>
+        </div>
+
+        <!-- Register View (from PDF) -->
+        <div id="register-view" class="hidden p-8">
+          <h3 class="text-2xl font-bold text-gray-800 text-center mb-6">
+            Create Your Account
+          </h3>
+          <form id="register-form" class="space-y-4 modal-body">
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <input
+                type="text"
+                placeholder="Username"
+                class="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500"
+                required
+              />
+              <input
+                type="password"
+                placeholder="Create Password (8+ chars)"
+                class="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500"
+                required
+              />
+              <input
+                type="email"
+                placeholder="Enter Email ID"
+                class="md:col-span-2 w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500"
+                required
+              />
+              <div class="md:col-span-2 flex gap-2">
+                <input
+                  type="tel"
+                  placeholder="Mobile Number"
+                  class="flex-1 w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500"
+                  required
+                />
+                <button
+                  type="button"
+                  id="otp-button"
+                  class="p-3 bg-indigo-100 text-indigo-600 rounded-lg font-medium hover:bg-indigo-200"
+                >
+                  Verify OTP
+                </button>
+              </div>
+              <input
+                type="text"
+                placeholder="Address / Street"
+                class="md:col-span-2 w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500"
+              />
+              <input
+                type="text"
+                placeholder="City"
+                class="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500"
+              />
+              <input
+                type="text"
+                placeholder="State"
+                class="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500"
+              />
+              <input
+                type="text"
+                placeholder="Pincode"
+                class="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500"
+              />
+              <input
+                type="text"
+                placeholder="ID Proof (Aadhaar/PAN)"
+                class="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500"
+              />
+
+              <select
+                class="md:col-span-2 w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500 bg-white"
+                required
+              >
+                <option value="" disabled selected>
+                  Select Account Type...
+                </option>
+                <option value="user">General User / Patient</option>
+                <option value="practitioner">Register as Practitioner</option>
+                <option value="job_hr">Apply for Job: HR Department</option>
+                <option value="job_finance">
+                  Apply for Job: Finance Department
+                </option>
+                <option value="job_ceo">Apply for Job: CEO Department</option>
+                <option value="job_brainstormers">
+                  Apply for Job: Brainstormers
+                </option>
+                <option value="job_analyst">Apply for Job: Data Analyst</option>
+                <option value="job_scientist">
+                  Apply for Job: Data Scientist
+                </option>
+                <option value="job_research">
+                  Apply for Job: Research & Development
+                </option>
+                <option value="job_shareholders">
+                  Apply for Job: Shareholders Dept
+                </option>
+                <option value="job_meeting">
+                  Apply for Job: Meeting Rooms Dept
+                </option>
+                <option value="job_cctv">Apply for Job: CCTV Monitoring</option>
+                <option value="job_design">
+                  Apply for Job: Interior Designer
+                </option>
+                <option value="job_transport">
+                  Apply for Job: Transport Dept
+                </option>
+                <option value="job_emergency">
+                  Apply for Job: Emergency Conditions
+                </option>
+                <option value="job_cleaning">
+                  Apply for Job: Cleaning Staff
+                </option>
+              </select>
+            </div>
+
+            <button
+              type="submit"
+              class="w-full bg-green-600 text-white p-3 rounded-lg font-medium text-lg hover:bg-green-700 btn-glow transition-all mt-4"
+            >
+              Create Account
+            </button>
+          </form>
+          <p class="text-center text-sm mt-4">
+            Already have an account?
+            <a
+              href="#"
+              id="show-login-link"
+              class="text-green-600 font-medium hover:underline"
+              >Login</a
+            >
+          </p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Telemedicine Booking Modal -->
+    <div
+      id="telemedicine-modal"
+      class="hidden fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+    >
+      <div class="bg-white rounded-lg shadow-2xl w-full max-w-lg relative">
+        <button
+          id="close-telemedicine-modal"
+          class="absolute top-4 right-4 text-gray-500 hover:text-gray-800"
+        >
+          <i data-lucide="x" class="w-6 h-6"></i>
+        </button>
+        <div class="p-8">
+          <h3 class="text-2xl font-bold text-gray-800 mb-2">
+            Book Your Consultation
+          </h3>
+          <p class="text-gray-600 mb-6">
+            Select a practitioner and complete payment to confirm your booking.
+          </p>
+
+          <form id="payment-form" class="space-y-4">
+            <!-- Practitioner Selection -->
+            <div>
+              <label class="font-medium text-gray-700"
+                >Select Practitioner</label
+              >
+              <select
+                class="w-full p-3 mt-1 border rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500"
+              >
+                <option>Dr. Vani Sharma (Pitta Specialist) - ₹1200</option>
+                <option>Dr. Rohan Gupta (Vata Specialist) - ₹1200</option>
+                <option>Dr. Meera Singh (Kapha Specialist) - ₹1200</option>
+              </select>
+            </div>
+
+            <!-- Currency Converter (New Feature) -->
+            <div>
+              <label class="font-medium text-gray-700"
+                >Live Currency Estimate</label
+              >
+              <div class="flex gap-2 mt-1">
+                <select
+                  id="currency-select"
+                  class="flex-1 w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500 bg-white"
+                >
+                  <option value="" disabled selected>Select Currency...</option>
+                  <option value="USD">USD ($)</option>
+                  <option value="EUR">EUR (€)</option>
+                  <option value="GBP">GBP (£)</option>
+                  <option value="AUD">AUD (A$)</option>
+                  <option value="CAD">CAD (C$)</option>
+                </select>
+                <button
+                  type="button"
+                  id="convert-currency-button"
+                  class="p-3 bg-indigo-100 text-indigo-600 rounded-lg font-medium hover:bg-indigo-200"
+                >
+                  Estimate
+                </button>
+              </div>
+              <p
+                id="converted-price"
+                class="text-sm text-gray-600 mt-2 h-5"
+              ></p>
+            </div>
+
+            <!-- Payment Options -->
+            <div>
+              <label class="font-medium text-gray-700">Payment Method</label>
+              <div class="mt-2 grid grid-cols-2 gap-4">
+                <button
+                  type="button"
+                  class="flex items-center justify-center gap-2 p-3 border-2 border-green-500 bg-green-50 text-green-700 rounded-lg font-medium"
+                >
+                  <i data-lucide="activity" class="w-5 h-5"></i> ChitraHarsha
+                  UPI
+                </button>
+                <button
+                  type="button"
+                  class="flex items-center justify-center gap-2 p-3 border border-gray-300 text-gray-600 rounded-lg font-medium hover:bg-gray-100"
+                >
+                  <i data-lucide="credit-card" class="w-5 h-5"></i> Other UPI /
+                  Card
+                </button>
+              </div>
+            </div>
+
+            <!-- Cryptocurrency (as mentioned in PDF) -->
+            <div class="text-sm text-gray-500 text-center">
+              <input type="checkbox" id="crypto-check" class="mr-2 rounded" />
+              <label for="crypto-check"
+                >I want to pay with Cryptocurrency (e.g., CHC)</label
+              >
+            </div>
+
+            <button
+              type="submit"
+              class="w-full bg-green-600 text-white p-3 rounded-lg font-medium text-lg hover:bg-green-700 btn-glow transition-all"
+            >
+              Pay ₹1200 & Confirm Booking
+            </button>
+          </form>
+        </div>
+      </div>
+    </div>
+
+    <!-- Admin/Corporate Login Modal (New) -->
+    <div
+      id="admin-login-modal"
+      class="hidden fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+    >
+      <div class="bg-white rounded-lg shadow-2xl w-full max-w-md p-8 relative">
+        <button
+          id="close-admin-login-modal"
+          class="absolute top-4 right-4 text-gray-500 hover:text-gray-800"
+        >
+          <i data-lucide="x" class="w-6 h-6"></i>
+        </button>
+        <h3 class="text-2xl font-bold text-gray-800 text-center mb-6">
+          Corporate Portal Login
+        </h3>
+        <p class="text-center text-gray-600 text-sm mb-6">
+          This portal is for authorized ChitraHarsha VPK Ventures employees,
+          practitioners, and administrators only.
+        </p>
+        <form id="admin-login-form" class="space-y-4">
+          <input
+            type="text"
+            placeholder="Corporate Email or Virtual ID"
+            class="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500"
+            required
+          />
+          <input
+            type="password"
+            placeholder="Password"
+            class="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500"
+            required
+          />
+          <button
+            type="button"
+            class="w-full text-indigo-600 hover:underline text-left text-sm"
+          >
+            Login with Passkey
+            <i data-lucide="key-round" class="w-4 h-4 inline-block ml-1"></i>
+          </button>
+          <button
+            type="submit"
+            class="w-full bg-indigo-600 text-white p-3 rounded-lg font-medium text-lg hover:bg-indigo-700 btn-glow transition-all"
+          >
+            Secure Login
+          </button>
+        </form>
+      </div>
+    </div>
+
+    <!-- Notification Message -->
+    <div
+      id="notification-msg"
+      class="hidden fixed bottom-10 right-10 p-4 rounded-lg shadow-2xl z-[100] flex items-center gap-3"
+    >
+      <!-- Content injected by JS -->
+    </div>
+
+    <!-- Init Lucide Icons -->
+    <script>
+      lucide.createIcons();
+    </script>
+  </body>
+</html>
